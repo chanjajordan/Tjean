@@ -182,7 +182,7 @@ select.fc{appearance:none;-webkit-appearance:none;background-image:url("data:ima
 .ce{font-size:11px;line-height:1.2;padding:2px 4px;border-radius:4px;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;flex-shrink:0;-webkit-text-size-adjust:100%}
 
 /* ===== TOAST ===== */
-.tc-c{position:fixed;top:max(80px,calc(env(safe-area-inset-top,0px) + 70px));right:max(24px,env(safe-area-inset-right,24px));z-index:2000;display:flex;flex-direction:column;gap:8px}
+.tc-c{position:fixed;top:max(80px,calc(env(safe-area-inset-top,0px) + 70px));right:max(24px,env(safe-area-inset-right,24px));z-index:10001;display:flex;flex-direction:column;gap:8px}
 .ts{background:var(--bg2);border:1px solid var(--bdr);border-radius:var(--rl);padding:14px 20px;font-size:var(--fs-sm);display:flex;align-items:center;gap:10px;box-shadow:var(--sh2);animation:tsIn .3s ease;min-width:280px}
 .ts.success{border-left:4px solid var(--ok)}.ts.error{border-left:4px solid var(--er)}.ts.info{border-left:4px solid var(--ac)}
 @keyframes tsIn{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
@@ -3345,7 +3345,7 @@ function openCollectionForm(jobId){
         <button onclick="clearSignature()" style="position:absolute;top:4px;right:4px;font-size:10px;background:#eee;border:1px solid #ccc;border-radius:4px;padding:2px 8px;cursor:pointer">Clear</button>
       </div>
       <div style="border-top:1px solid #111;width:360px;margin-left:auto;margin-top:-1px;padding-top:4px">
-        <div style="font-size:12px">Signature of ABO/APC/ Customer</div>
+        <div style="font-size:12px">Signature of Customer</div>
         <div style="font-size:11px;color:#666;margin-top:4px">Printed Date: ${fmtDate}</div>
       </div>
     </div>
@@ -3388,16 +3388,18 @@ function isSignatureEmpty(){const c=document.getElementById('sigCanvas');if(!c)r
 
 // Generate signed PDF using jsPDF
 async function generateSignedPDF(jobId){
-  if(isSignatureEmpty()){toast('Please sign before generating PDF','error');return;}
-  const j=DB.jobs.find(x=>x.id===jobId);if(!j)return;
+  if(isSignatureEmpty()){toast('Please sign before generating PDF','error');return false;}
+  const j=DB.jobs.find(x=>x.id===jobId);if(!j)return false;
   const cust=DB.custs.find(c=>c.name===j.customer)||{};
 
-  // Load pdf-lib for modifying existing PDFs
+  // Load pdf-lib for modifying existing PDFs (with a hard timeout so a blocked/slow
+  // network can never leave us hanging silently — the button must always respond)
   if(!window.PDFLib){
+    toast('Preparing PDF engine…','info');
     const s=document.createElement('script');
     s.src='https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js';
     document.head.appendChild(s);
-    await new Promise(r=>{s.onload=r;s.onerror=()=>{toast('Failed to load PDF library','error');r();}});
+    await new Promise(r=>{let done=false;const fin=()=>{if(!done){done=true;r();}};s.onload=fin;s.onerror=fin;setTimeout(fin,8000);});
   }
 
   const sigCanvas=document.getElementById('sigCanvas');
@@ -3442,30 +3444,73 @@ async function generateSignedPDF(jobId){
     // No original PDF attached — generate from scratch matching TJean layout exactly
     pdfBytes=await generatePDFFromScratch(j,cust,sigPng,fmtNow);
   }else{
-    toast('PDF library not available','error');return;
+    toast('PDF library needs internet on first use — connect once, then retry','error');return false;
   }
 
-  // Download
+  // Persist to the job FIRST so the PDF is never lost even if the device blocks the download
   const blob=new Blob([pdfBytes],{type:'application/pdf'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');
-  a.href=url;a.download=`Job_ID_${j.id}_${(cust.name||'').replace(/[^a-zA-Z0-9]/g,'_')}_signed.pdf`;
-  a.click();URL.revokeObjectURL(url);
+  const dataUrl=await new Promise(res=>{const rd=new FileReader();rd.onload=()=>res(rd.result);rd.readAsDataURL(blob);});
+  const i=DB.jobs.findIndex(x=>x.id===jobId);
+  if(i>=0){DB.jobs[i].signedPDF=dataUrl;DB.jobs[i].signedAt=now.toISOString();DB.jobs[i]._modifiedAt=Date.now();markTouched('jobs');saveDB();flushPendingSync();}
+  // Attempt a direct download (works on desktop; mobile may block after await — PDF is already saved either way)
+  try{const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`Job_ID_${j.id}_${(cust.name||'').replace(/[^a-zA-Z0-9]/g,'_')}_signed.pdf`;a.click();setTimeout(()=>URL.revokeObjectURL(url),4000);}catch(e){}
+  toast('Signed PDF saved ✓ — open it any time via "View Signed PDF" on the job','success');
+  return true;
+}
 
-  // Save to job record
-  const reader=new FileReader();
-  reader.onload=()=>{
-    const i=DB.jobs.findIndex(x=>x.id===jobId);
-    if(i>=0){DB.jobs[i].signedPDF=reader.result;DB.jobs[i].signedAt=now.toISOString();DB.jobs[i]._modifiedAt=Date.now();markTouched('jobs');saveDB();flushPendingSync();}
-  };
-  reader.readAsDataURL(blob);
-  toast('Signed PDF generated & saved','success');
+// Helvetica (WinAnsi) can't encode CJK; strip non-Latin so Latin-only drawText never throws.
+function pdfSafe(s){return String(s==null?'':s).replace(/[^\x20-\x7E\xA1-\xFF]/g,'');}
+// Mixed Latin+CJK renderer: draws Latin runs with Helvetica (crisp, no subset issues) and CJK
+// runs with the embedded CJK font. Subsetting keeps CJK glyphs fine but mangles Latin, so we
+// never send Latin through the CJK font.
+function _isCJK(cp){return (cp>=0x2E80&&cp<=0x9FFF)||(cp>=0x3000&&cp<=0x30FF)||(cp>=0xAC00&&cp<=0xD7A3)||(cp>=0xFF00&&cp<=0xFFEF)||(cp>=0x20000&&cp<=0x2FA1F);}
+function drawRich(page,text,x,y,size,latin,cjk,color){
+  text=String(text==null?'':text);
+  if(!cjk){page.drawText(text.replace(/[^\x20-\x7E\xA1-\xFF]/g,''),{x,y,size,font:latin,color});return;}
+  let i=0;
+  while(i<text.length){
+    const cp=text.codePointAt(i);const useCJK=_isCJK(cp);
+    let run=String.fromCodePoint(cp);let j=i+(cp>0xFFFF?2:1);
+    while(j<text.length){const c2=text.codePointAt(j);if(_isCJK(c2)===useCJK){run+=String.fromCodePoint(c2);j+=(c2>0xFFFF?2:1);}else break;}
+    const f=useCJK?cjk:latin;
+    const draw=useCJK?run:run.replace(/[^\x20-\x7E\xA1-\xFF]/g,'');
+    if(draw){try{page.drawText(draw,{x,y,size,font:f,color});x+=f.widthOfTextAtSize(draw,size);}catch(e){}}
+    i=j;
+  }
+}
+
+// ----- CJK font embedding (so Chinese shows in the signed PDF) -----
+// Swappable: host the .otf next to this file and point CJK_FONT_URL at it for full offline use.
+const CJK_FONT_URL='https://cdn.jsdelivr.net/npm/@expo-google-fonts/noto-sans-sc@0.2.3/NotoSansSC_400Regular.ttf';
+const FONTKIT_URL='https://cdn.jsdelivr.net/npm/@pdf-lib/fontkit@1.1.1/dist/fontkit.umd.min.js';
+let _cjkFontBytes=null;
+function _loadScriptOnce(src){return new Promise(res=>{const s=document.createElement('script');s.src=src;let done=false;const fin=ok=>{if(!done){done=true;res(ok);}};s.onload=()=>fin(true);s.onerror=()=>fin(false);setTimeout(()=>fin(false),12000);document.head.appendChild(s);});}
+async function getCJKFontBytes(){
+  if(_cjkFontBytes)return _cjkFontBytes;
+  try{
+    if(typeof toast==='function')toast('Loading Chinese font (first time only)…','info');
+    const r=await fetch(CJK_FONT_URL);
+    if(!r||!r.ok)return null;
+    _cjkFontBytes=new Uint8Array(await r.arrayBuffer());
+    return _cjkFontBytes;
+  }catch(e){console.warn('CJK font fetch failed:',e);return null;}
+}
+// Embed CJK font into a pdf-lib doc; returns the font, or null so caller falls back to Helvetica.
+async function embedCJKFont(pdfDoc){
+  try{
+    if(!window.fontkit){const ok=await _loadScriptOnce(FONTKIT_URL);if(!ok||!window.fontkit)return null;}
+    const bytes=await getCJKFontBytes();if(!bytes)return null;
+    pdfDoc.registerFontkit(window.fontkit);
+    return await pdfDoc.embedFont(bytes,{subset:true}); // subset = only used glyphs, keeps PDF small
+  }catch(e){console.warn('CJK font embed failed:',e);return null;}
 }
 
 async function generatePDFFromScratch(j,cust,sigPng,fmtNow){
   // Fallback: create PDF matching TJean layout using pdf-lib
   const pdfDoc=await PDFLib.PDFDocument.create();
   const page=pdfDoc.addPage([595.28,841.89]); // A4
+  // Embed a CJK font for Chinese (null if offline/blocked). Latin always uses Helvetica.
+  const cjkFont=await embedCJKFont(pdfDoc);
   const helvetica=await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica);
   const helveticaBold=await pdfDoc.embedFont(PDFLib.StandardFonts.HelveticaBold);
   const{width,height}=page.getSize();
@@ -3478,11 +3523,11 @@ async function generatePDFFromScratch(j,cust,sigPng,fmtNow){
   const fmtDate=isNaN(dd)?j.date:`${String(dd.getDate()).padStart(2,'0')}/${String(dd.getMonth()+1).padStart(2,'0')}/${dd.getFullYear()}, ${dayName}`;
 
   const remarks=document.getElementById('cfRemarks')?document.getElementById('cfRemarks').value:(j.remarks||j.desc||'');
-  const sku=document.getElementById('cfSku')?document.getElementById('cfSku').value:(j.sku||'');
+  const sku=pdfSafe(document.getElementById('cfSku')?document.getElementById('cfSku').value:(j.sku||''));
   const desc=document.getElementById('cfDesc')?document.getElementById('cfDesc').value:(app?app.model+' - '+app.serial:'');
-  const serial=document.getElementById('cfSerial')?document.getElementById('cfSerial').value:(app?app.serial:'');
-  const warranty=document.getElementById('cfWarranty')?document.getElementById('cfWarranty').value:(j.warrantyIn?'In-warranty':'Out-of-warranty');
-  const salesOrder=document.getElementById('cfSalesOrder')?document.getElementById('cfSalesOrder').value:(j.salesOrder||cust.ada||'');
+  const serial=pdfSafe(document.getElementById('cfSerial')?document.getElementById('cfSerial').value:(app?app.serial:''));
+  const warranty=pdfSafe(document.getElementById('cfWarranty')?document.getElementById('cfWarranty').value:(j.warrantyIn?'In-warranty':'Out-of-warranty'));
+  const salesOrder=pdfSafe(document.getElementById('cfSalesOrder')?document.getElementById('cfSalesOrder').value:(j.salesOrder||cust.ada||''));
   const black=PDFLib.rgb(0,0,0);
   const white=PDFLib.rgb(1,1,1);
   const blue=PDFLib.rgb(0,0.4,0.63);
@@ -3490,9 +3535,9 @@ async function generatePDFFromScratch(j,cust,sigPng,fmtNow){
 
   // Header - Date, Time, Address (right side, matching original position x=159)
   const tx=160;
-  page.drawText('Date: '+fmtDate,{x:tx,y:y,size:12,font:helvetica,color:black});y-=20;
-  page.drawText('Time: '+(j.time||''),{x:tx,y:y,size:12,font:helvetica,color:black});y-=20;
-  page.drawText('Address: '+(cust.address||''),{x:tx,y:y,size:12,font:helvetica,color:black});
+  page.drawText(pdfSafe('Date: '+fmtDate),{x:tx,y:y,size:12,font:helvetica,color:black});y-=20;
+  page.drawText(pdfSafe('Time: '+(j.time||'')),{x:tx,y:y,size:12,font:helvetica,color:black});y-=20;
+  drawRich(page,'Address: '+(cust.address||''),tx,y,12,helvetica,cjkFont,black);
 
   // TJean letterhead (top right)
   page.drawText('TJean',{x:450,y:height-58,size:26,font:helveticaBold,color:black});
@@ -3533,7 +3578,7 @@ async function generatePDFFromScratch(j,cust,sigPng,fmtNow){
   y-=18;
   page.drawRectangle({x:28,y:y-4,width:538,height:20,borderColor:black,borderWidth:0.5});
   page.drawText(sku,{x:32,y:y+2,size:8,font:helvetica,color:black});
-  page.drawText(desc.substring(0,45),{x:97,y:y+2,size:8,font:helvetica,color:black});
+  drawRich(page,desc.substring(0,45),97,y+2,8,helvetica,cjkFont,black);
   page.drawText(serial,{x:296,y:y+2,size:8,font:helvetica,color:black});
   page.drawText(warranty,{x:395,y:y+2,size:8,font:helvetica,color:black});
   page.drawText(salesOrder,{x:494,y:y+2,size:8,font:helvetica,color:black});
@@ -3553,15 +3598,15 @@ async function generatePDFFromScratch(j,cust,sigPng,fmtNow){
   // Contacts data
   y-=18;
   page.drawRectangle({x:28,y:y-4,width:538,height:20,borderColor:black,borderWidth:0.5});
-  page.drawText(cust.name||'',{x:32,y:y+2,size:9,font:helvetica,color:black});
-  page.drawText(cust.email||'',{x:250,y:y+2,size:9,font:helvetica,color:black});
-  page.drawText(cust.phone||cust.homePhone||'',{x:440,y:y+2,size:9,font:helvetica,color:black});
+  drawRich(page,cust.name||'',32,y+2,9,helvetica,cjkFont,black);
+  page.drawText(pdfSafe(cust.email||''),{x:250,y:y+2,size:9,font:helvetica,color:black});
+  page.drawText(pdfSafe(cust.phone||cust.homePhone||''),{x:440,y:y+2,size:9,font:helvetica,color:black});
 
   // Comment/Remarks box
   y-=40;
   page.drawRectangle({x:28,y:y-60,width:538,height:80,borderColor:PDFLib.rgb(0.4,0.4,0.4),borderWidth:0.5});
   page.drawText('Comment/Remarks',{x:32,y:y+10,size:10,font:helvetica,color:PDFLib.rgb(0.3,0.3,0.3)});
-  page.drawText(remarks.substring(0,200),{x:38,y:y-10,size:12,font:helvetica,color:black});
+  drawRich(page,remarks.substring(0,200),38,y-10,12,helvetica,cjkFont,black);
 
   // Acknowledgment
   y-=85;
@@ -3576,7 +3621,7 @@ async function generatePDFFromScratch(j,cust,sigPng,fmtNow){
 
   // Signature line
   page.drawLine({start:{x:sigX,y:sigY-55},end:{x:sigX+sigDims.width,y:sigY-55},thickness:0.5,color:black});
-  page.drawText('Signature of ABO/APC/ Customer',{x:sigX,y:sigY-68,size:10,font:helvetica,color:black});
+  page.drawText('Signature of Customer',{x:sigX,y:sigY-68,size:10,font:helvetica,color:black});
   page.drawText('Printed Date : '+fmtNow,{x:sigX,y:sigY-82,size:9,font:helvetica,color:black});
 
   return await pdfDoc.save();
@@ -3584,11 +3629,12 @@ async function generatePDFFromScratch(j,cust,sigPng,fmtNow){
 
 function saveAndCompleteJob(jobId){
   if(isSignatureEmpty()){toast('Please sign before completing','error');return;}
-  generateSignedPDF(jobId).then(()=>{
+  generateSignedPDF(jobId).then((ok)=>{
+    if(!ok)return; // PDF failed (e.g. offline) — keep form open, error already shown
     const i=DB.jobs.findIndex(j=>j.id===jobId);
     if(i>=0){DB.jobs[i].status='Completed';DB.jobs[i]._modifiedAt=Date.now();markTouched('jobs');saveDB();flushPendingSync();}
     closeCollectionForm();renderJobs();updCounts();toast('Job completed with signed form','success');
-  });
+  }).catch(err=>{console.error('complete job failed:',err);toast('Could not complete: '+err.message,'error');});
 }
 
 function viewSignedPDF(jobId){
