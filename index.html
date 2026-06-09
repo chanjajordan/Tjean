@@ -4407,6 +4407,7 @@ const ZH_EN={
   '蒸汽烤箱':'Steam Oven','蒸烤箱':'Steam Oven','蒸烤':'Steam Oven','蒸箱':'Steamer','烤箱':'Oven',
   '小魔方':'Mini Cube','微波炉':'Microwave','洗碗机':'Dishwasher','净水器':'Water Purifier',
   '空气炸锅':'Air Fryer','电饭煲':'Rice Cooker','燃气灶':'Gas Stove','抽油烟机':'Range Hood','热水器':'Water Heater',
+  '意式咖啡机':'Italian Coffee Machine','咖啡机':'Coffee Machine','意式':'Italian',
   // fault phrases (longest first matters via sort)
   '蒸汽模式积水':'water pooling in steam mode','右侧轻微凹陷':'slight dent on right side',
   '密封圈有点脱胶':'sealing ring slightly unglued','箱门左侧有缝隙会漏水':'gap on left side of cabinet door causing water leak',
@@ -4480,9 +4481,9 @@ async function importSupplierExcel(file){
     const stats={added:0,dupes:0,noRepair:0,skipped:0,reasons:[]};
     for(let i=hr+1;i<aoa.length;i++){
       const r=aoa[i];if(!r||!r.length)continue;
-      const name=String(cell(r,ix.name)).trim();
       const noCol=String(cell(r,ix.no)).trim();
-      if(!name||!/^\d+$/.test(noCol))continue; // not a data row
+      if(!/^\d+$/.test(noCol))continue; // header / title / blank row — not a data row
+      const rawName=String(cell(r,ix.name)).trim();
       const faultZh=String(cell(r,ix.fault)).trim();
       const productZh=String(cell(r,ix.productName)).trim();
       const model=String(cell(r,ix.model)).trim();
@@ -4490,7 +4491,12 @@ async function importSupplierExcel(file){
       const phone=String(cell(r,ix.phone)).trim();
       const orderNo=String(cell(r,ix.orderNo)).trim();
       const date=xlsxRowDate(cell(r,ix.date));
-      if(/无需维修/.test(faultZh)){stats.noRepair++;stats.reasons.push(`Row ${i+1}: ${name} — no repair needed (skipped)`);continue;}
+      // A numeric 序号 means a real repair entry. If the customer name is blank, still import
+      // it (with a clear placeholder) and flag it — never silently drop the row.
+      const name=rawName||(phone?('Customer '+phone):('Unnamed (No.'+noCol+')'));
+      if(!rawName)stats.reasons.push(`Row ${i+1}: No.${noCol} had no customer name — imported as "${name}" (please rename)`);
+      const noRepair=/无需维修/.test(faultZh); // import these but mark Completed (no repair required)
+      if(noRepair){stats.noRepair++;stats.reasons.push(`Row ${i+1}: ${name} — no repair needed (imported as Completed)`);}
       const key=orderNo||`${name}#${model}#${faultZh}`;
       if(seen.has(key)||(orderNo&&seen.has(orderNo))){stats.dupes++;stats.reasons.push(`Row ${i+1}: ${name} — already imported (order ${orderNo||'n/a'})`);continue;}
       seen.add(key);if(orderNo)seen.add(orderNo);
@@ -4511,7 +4517,7 @@ async function importSupplierExcel(file){
       const faultEN=translateZh(faultZh);
       const job={id:seq,title:`${productEN}${faultEN?' - '+faultEN:''}`.trim()||`Repair - ${name}`,
         customer:name,applianceId:app.id,appliance:`${app.model} (${app.serial})`,type:'Repair',priority:'Medium',
-        status:'Open',date,time:'09:00',desc:faultEN,repair:'',
+        status:noRepair?'Completed':'Open',date,time:'09:00',desc:faultEN,repair:noRepair?'No repair needed':'',
         remarks:`[原文] ${productZh}${faultZh?' / '+faultZh:''}${orderNo?' / 订单号:'+orderNo:''}`,
         warrantyIn:inWarr?'x':'',warrantyOut:inWarr?'':'x',quoteNum:'',paymentStatus:'',collectedOn:'',
         techIds:[],importKey:key,source:'TJEAN Excel',createdAt:new Date().toISOString(),_modifiedAt:now};
@@ -4521,7 +4527,7 @@ async function importSupplierExcel(file){
     }
     saveDB();if(typeof flushPendingSync==='function')flushPendingSync();
     let body=`<p style="font-size:var(--fs-lg)"><strong>Added ${stats.added} job(s)</strong></p>`;
-    body+=`<p style="font-size:13px;color:var(--t2);margin-top:6px">Skipped: ${stats.dupes} duplicate · ${stats.noRepair} no-repair-needed · ${stats.skipped} job-no. clash</p>`;
+    body+=`<p style="font-size:13px;color:var(--t2);margin-top:6px">${stats.noRepair} no-repair (Completed) · Skipped: ${stats.dupes} duplicate · ${stats.skipped} job-no. clash</p>`;
     if(stats.reasons.length){body+='<ul style="font-size:12px;line-height:1.6;margin-top:10px">';stats.reasons.slice(0,15).forEach(x=>body+=`<li>${E(x)}</li>`);if(stats.reasons.length>15)body+=`<li><em>…and ${stats.reasons.length-15} more</em></li>`;body+='</ul>';}
     openModal('Supplier Excel Import',body,'<button class="btn btn-p" onclick="closeModal()">OK</button>');
     refreshPage();
