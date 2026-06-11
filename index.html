@@ -476,6 +476,9 @@ function saveDB(){
   }
   DB._modifiedAt=now;
   try{localStorage.setItem(DB_KEY,JSON.stringify(DB));}catch(e){toast('Storage error: '+e.message,'error');}
+  // Job alerts: diff against last snapshot on every save (new job / status change)
+  if(_notifReady){try{diffJobsAndNotify(_jobSnapshot,false);}catch(e){}}
+  _jobSnapshot=snapshotJobs();
   publishCalendarToShared();
   // Push our own DB to cloud (debounced, but short so phone backgrounding doesn't lose it)
   clearTimeout(window._fbSaveTimer);
@@ -887,12 +890,17 @@ function initFB(){
         DB=mergeCloudIntoLocal(DB,d);
         ensureDefaultUsers();
         try{localStorage.setItem(DB_KEY,JSON.stringify(DB));}catch(e){}
+        _jobSnapshot=snapshotJobs(); // baseline only — no alerts for pre-existing jobs
         if(CUR_USER)refreshPage();
       }else if(!_fbSyncBusy){
         // Live remote update — merge into our DB by id, preferring newer _modifiedAt
+        const prevSnap=_jobSnapshot;
         DB=mergeCloudIntoLocal(DB,d);
         ensureDefaultUsers();
         try{localStorage.setItem(DB_KEY,JSON.stringify(DB));}catch(e){}
+        // Alert on jobs created/status-changed by other devices
+        if(_notifReady){try{diffJobsAndNotify(prevSnap,false);}catch(e){}}
+        _jobSnapshot=snapshotJobs();
         if(CUR_USER)refreshPage();
       }
     });
