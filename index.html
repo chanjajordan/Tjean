@@ -2102,10 +2102,10 @@ function openQuickPartChange(applianceId,jobId){
   const sorted=DB.parts.slice().sort((a,b)=>(a.category||'').localeCompare(b.category||'')||(a.name||'').localeCompare(b.name||''));
   const match=sorted.filter(p=>partMatchesModel(p,app.model));
   const rest=sorted.filter(p=>!partMatchesModel(p,app.model));
-  const opt=p=>`<option value="${p.id}">${E(p.name)} (${E(p.code)}) — stock ${p.stock}</option>`;
+  const opt=p=>`<option value="${p.id}">${E(p.name)} (${E(p.code)}) — stock ${p.stock}${p.location?' · 📍'+E(p.location):''}</option>`;
   let opts='';
   if(match.length)opts+=`<optgroup label="✓ For this machine (${E(app.model)})">${match.map(opt).join('')}</optgroup>`;
-  const byCat={};rest.forEach(p=>{const c=p.category||'Other';(byCat[c]=byCat[c]||[]).push(p);});
+  const byCat={};rest.forEach(p=>{const c=pType(p)+' · '+(p.category||'Other');(byCat[c]=byCat[c]||[]).push(p);});
   Object.keys(byCat).sort().forEach(c=>{opts+=`<optgroup label="${E(c)}">${byCat[c].map(opt).join('')}</optgroup>`;});
   openModal('Log Part Change — '+app.model,
     `<p style="font-size:13px;color:var(--t2);margin-bottom:10px">Customer: <strong>${E(getCustName(app.custId))}</strong> · Serial: <code>${E(app.serial)}</code></p>
@@ -2181,21 +2181,28 @@ function viewApplianceHistory(id){
 
 // ===== PARTS INVENTORY =====
 function renderParts(filter){
-  const fv=filter||'all';
-  // Sorted by machine model (category) then part name so one machine's parts sit together
-  let list=DB.parts.slice().sort((a,b)=>(a.category||'').localeCompare(b.category||'')||(a.name||'').localeCompare(b.name||''));
+  const fv=filter||'all';            // 'all' | 'low' | 'out' | <Type of Appliance>
+  const mv=arguments.length>1?arguments[1]:''; // optional model filter within a type
+  // Sorted by appliance type, then machine model, then part name
+  let list=DB.parts.slice().sort((a,b)=>pType(a).localeCompare(pType(b))||(a.category||'').localeCompare(b.category||'')||(a.name||'').localeCompare(b.name||''));
   if(fv==='low')list=list.filter(p=>p.stock<=p.minStock&&p.stock>0);
   else if(fv==='out')list=list.filter(p=>p.stock===0);
-  else if(fv!=='all')list=list.filter(p=>p.category===fv);
-  const cats=[...new Set(DB.parts.map(p=>p.category))];
+  else if(fv!=='all'){list=list.filter(p=>pType(p)===fv);if(mv)list=list.filter(p=>(p.category||'')===mv);}
+  const types=[...new Set(DB.parts.map(p=>pType(p)))].sort();
+  const modelsInType=fv!=='all'&&fv!=='low'&&fv!=='out'?[...new Set(DB.parts.filter(p=>pType(p)===fv).map(p=>p.category||'—'))].sort():[];
   document.getElementById('partsContent').innerHTML=`
     <div class="oc"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px"><h3 style="margin:0">Spare Parts (${list.length}/${DB.parts.length})</h3>${canEdit()?'<button class="btn btn-p btn-sm" onclick="openPartModal()">+ Add Part</button>':''}</div>
       <div class="flex-row" style="margin-top:12px">
         <button class="fc-chip ${fv==='all'?'active':''}" onclick="renderParts('all')">All</button>
         <button class="fc-chip ${fv==='low'?'active':''}" onclick="renderParts('low')" style="${fv!=='low'?'border-color:var(--wn);color:var(--wn)':''}">Low Stock</button>
         <button class="fc-chip ${fv==='out'?'active':''}" onclick="renderParts('out')" style="${fv!=='out'?'border-color:var(--er);color:var(--er)':''}">Out of Stock</button>
-        ${cats.map(c=>`<button class="fc-chip ${fv===c?'active':''}" onclick="renderParts('${E(c)}')">${E(c)}</button>`).join('')}
+        ${types.map(t=>`<button class="fc-chip ${fv===t&&!mv?'active':''}" onclick="renderParts('${E(t)}')">${E(t)}</button>`).join('')}
       </div>
+      ${modelsInType.length?`<div class="flex-row" style="margin-top:8px;padding-left:8px;border-left:3px solid var(--bdr2)">
+        <span style="font-size:12px;color:var(--t3);align-self:center">Models:</span>
+        <button class="fc-chip ${!mv?'active':''}" onclick="renderParts('${E(fv)}')">All ${E(fv)}</button>
+        ${modelsInType.map(m=>`<button class="fc-chip ${mv===m?'active':''}" onclick="renderParts('${E(fv)}','${E(m)}')">${E(m)}</button>`).join('')}
+      </div>`:''}
     </div>
     <div class="parts-grid">
       ${list.length?list.map(p=>{const cls=p.stock===0?'out-stock':p.stock<=p.minStock?'low-stock':'';const stockBd=p.stock===0?'bd-er':p.stock<=p.minStock?'bd-wn':'bd-ok';const wt=p.defaultWarrantyType==='3m'?'3-month':'1-year';return`<div class="part-card ${cls}" onclick="viewPart(${p.id})">
@@ -2203,6 +2210,7 @@ function renderParts(filter){
         <div class="part-info">
           <h4>${E(p.name)}</h4>
           <div class="pn">${E(p.code)}${p.oracleItem?` <span style="color:var(--t3);font-size:10px">· Oracle: ${E(p.oracleItem)}</span>`:''}</div>
+          <div class="pn" style="color:var(--t3);font-size:11px">${E(pType(p))} · ${E(p.category||'—')}${p.location?` · 📍${E(p.location)}`:''}</div>
           <div class="pp">${fmtMoney(p.price)}</div>
           <div class="part-stock"><span class="bd ${stockBd}" style="font-size:11px">Stock: ${p.stock}</span><span style="font-size:11px;color:var(--t3)">${E(wt)} warranty</span></div>
           ${canEdit()?`<button class="btn btn-sm btn-s" style="margin-top:8px;width:100%" onclick="event.stopPropagation();copyPart(${p.id})" title="New part pre-filled from this one">⧉ Copy as New</button>`:''}
@@ -2225,6 +2233,13 @@ function knownModels(){
   DB.parts.forEach(p=>{if(p&&p.category)s.add(p.category);});
   return [...s].sort();
 }
+// Top-level grouping: Type of Appliance. Parts saved before this field exist -> 'General'.
+function pType(p){return (p&&p.type)||'General';}
+function knownTypes(){
+  const s=new Set(['Steam Oven','Coffee Machine','Vacuum Cleaner','General']);
+  DB.parts.forEach(p=>{if(p&&p.type)s.add(p.type);});
+  return [...s].sort();
+}
 function openPartModal(data){
   const isEditing=!!(data&&data.id);
   const draftKey=isEditing?'part_edit_'+data.id:'part_new';
@@ -2235,8 +2250,11 @@ function openPartModal(data){
     <div class="fr"><div class="fg"><label>Part Name *</label><input class="fc" id="pNm" value="${E(d.name||'')}"></div>
     <div class="fg"><label>Part Code *</label><input class="fc" id="pCd" value="${E(d.code||'')}" style="font-family:monospace"></div></div>
     <div class="fr"><div class="fg"><label>Oracle Item Code</label><input class="fc" id="pOI" value="${E(d.oracleItem||'')}" style="font-family:monospace" placeholder="Stock system code"></div>
+    <div class="fg"><label>Type of Appliance</label><input class="fc" id="pTy" list="pTypeList" value="${E(d.type||'General')}" placeholder="Coffee Machine, Steam Oven, Vacuum Cleaner…">
+    <datalist id="pTypeList">${knownTypes().map(t=>`<option value="${E(t)}">`).join('')}</datalist></div></div>
     <div class="fg"><label>Machine Model / Category</label><input class="fc" id="pCt" list="pCtModels" value="${E(d.category||'General')}" placeholder="Pick a model or type a new one…">
-    <datalist id="pCtModels">${knownModels().map(m=>`<option value="${E(m)}">`).join('')}</datalist></div></div>
+    <datalist id="pCtModels">${knownModels().map(m=>`<option value="${E(m)}">`).join('')}</datalist></div>
+    <div class="fg"><label>Storage Location</label><input class="fc" id="pLoc" value="${E(d.location||'')}" placeholder="e.g. Shelf A3 · Bin 5 · Store room"></div>
     <div class="fr"><div class="fg" style="display:none"></div>
     <div class="fg"><label>Customer Price ($) *</label><input class="fc" type="number" step="0.01" id="pPr" value="${d.price||0}"></div></div>
     <div class="fr3"><div class="fg"><label>Stock Qty</label><input class="fc" type="number" id="pSk" value="${d.stock||0}" min="0"></div>
@@ -2284,7 +2302,7 @@ function onPartPhotoSelect(e){
 function editPart(id){const p=DB.parts.find(x=>x.id===id);if(p)openPartModal(p);}
 function savePart(){
   const eid=document.getElementById('ePId').value;
-  const d={name:document.getElementById('pNm').value.trim(),code:document.getElementById('pCd').value.trim(),oracleItem:document.getElementById('pOI').value.trim(),category:document.getElementById('pCt').value.trim()||'General',price:parseFloat(document.getElementById('pPr').value)||0,stock:parseInt(document.getElementById('pSk').value)||0,minStock:parseInt(document.getElementById('pMn').value)||0,defaultWarrantyType:document.getElementById('pWt').value,photo:document.getElementById('pPhData').value,notes:document.getElementById('pNt').value.trim(),_modifiedAt:Date.now()};
+  const d={name:document.getElementById('pNm').value.trim(),code:document.getElementById('pCd').value.trim(),oracleItem:document.getElementById('pOI').value.trim(),type:(document.getElementById('pTy')?document.getElementById('pTy').value.trim():'')||'General',category:document.getElementById('pCt').value.trim()||'General',location:(document.getElementById('pLoc')?document.getElementById('pLoc').value.trim():''),price:parseFloat(document.getElementById('pPr').value)||0,stock:parseInt(document.getElementById('pSk').value)||0,minStock:parseInt(document.getElementById('pMn').value)||0,defaultWarrantyType:document.getElementById('pWt').value,photo:document.getElementById('pPhData').value,notes:document.getElementById('pNt').value.trim(),_modifiedAt:Date.now()};
   if(!d.name||!d.code){toast('Name and code are required','error');return;}
   if(eid){const i=DB.parts.findIndex(p=>p.id===parseInt(eid));if(i>=0)DB.parts[i]={...DB.parts[i],...d};}
   else{d.id=DB.nextIds.p++;DB.parts.push(d);}
@@ -2312,6 +2330,7 @@ function viewPart(id){
     <div class="rpt-card-row"><span class="rc-label">Min Stock</span><span class="rc-val">${p.minStock}</span></div>
   </div>
   <div class="rpt-card-row"><span class="rc-label">Default Warranty</span><span class="rc-val">${E(wt)} (when out of appliance warranty)</span></div>
+  ${p.location?`<div class="rpt-card-row"><span class="rc-label">📍 Location</span><span class="rc-val" style="font-weight:700">${E(p.location)}</span></div>`:''}
   ${p.notes?`<div class="rpt-card-row"><span class="rc-label">Notes</span><span class="rc-val">${E(p.notes)}</span></div>`:''}
   <h4 style="margin-top:20px;margin-bottom:10px">Usage History (${usage.length} unit${usage.length!==1?'s':''} sold)</h4>`;
   if(usage.length){
@@ -4331,7 +4350,7 @@ function exportCSV(table){
   switch(table){
     case 'customers':headers=['id','name','address','phone','email','joined'];rows=DB.custs;break;
     case 'appliances':headers=['id','custId','customer','model','serial','installDate','warrantyMonths','location'];rows=DB.appliances.map(a=>({...a,customer:getCustName(a.custId)}));break;
-    case 'parts':headers=['id','name','code','oracleItem','category','price','stock','minStock','defaultWarrantyType','notes'];rows=DB.parts;break;
+    case 'parts':headers=['id','name','code','oracleItem','type','category','location','price','stock','minStock','defaultWarrantyType','notes'];rows=DB.parts;break;
     case 'reports':headers=['id','jobNo','date','customer','appliance','type','issue','resolution','engineer','totalCost','nextVisit'];rows=DB.reports;break;
     case 'partChanges':headers=['id','installDate','warrantyEnd','customer','appliance','part','source'];rows=DB.partChanges.map(pc=>({...pc,customer:getCustName(pc.custId),appliance:getApplianceLabel(pc.applianceId),part:(getPartById(pc.partId)||{}).name||''}));break;
     case 'jobs':headers=['id','title','customer','appliance','type','priority','date','time','status','desc','techNames'];rows=DB.jobs.map(j=>({...j,techNames:getJobTechNames(j)}));break;
@@ -4435,7 +4454,7 @@ function importCSV(file){
             if(!name||!code){stats.skipped++;stats.reasons.push(`Row ${idx+2}: missing name/code`);return;}
             const id=pid(row.id);
             const wt=ptrim(row.defaultWarrantyType);
-            const rec={name,code,oracleItem:ptrim(row.oracleItem||row.oracleitem),category:ptrim(row.category)||'General',price:pnum(row.price),stock:pint(row.stock),minStock:pint(row.minStock),defaultWarrantyType:(wt==='3m'?'3m':'1y'),notes:ptrim(row.notes),photo:'',_modifiedAt:now};
+            const rec={name,code,oracleItem:ptrim(row.oracleItem||row.oracleitem),type:ptrim(row.type)||'General',category:ptrim(row.category)||'General',location:ptrim(row.location),price:pnum(row.price),stock:pint(row.stock),minStock:pint(row.minStock),defaultWarrantyType:(wt==='3m'?'3m':'1y'),notes:ptrim(row.notes),photo:'',_modifiedAt:now};
             if(id){
               const existing=DB.parts.findIndex(p=>p.id===id);
               if(existing>=0){
