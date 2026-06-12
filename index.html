@@ -4185,6 +4185,16 @@ function renderData(){
       <p style="font-size:12px;color:var(--t3);margin-top:8px">💡 Original Chinese text is kept in the job's Remarks for reference. Re-run any time a new sheet arrives — only new rows are added.</p>
     </div>`:''}
 
+    ${canEdit()?`<div class="oc"><h3>🤖 AI Translation Key</h3>
+      <p>Optional. The Excel import translates with a built-in glossary first; phrases it doesn't know stay in Chinese. Save a free <strong>Google Gemini</strong> API key and those leftovers are auto-translated to English on every import. Get a key at <a href="https://aistudio.google.com/apikey" target="_blank" style="color:var(--ac)">aistudio.google.com/apikey</a>.</p>
+      <div class="flex-row" style="margin-top:12px">
+        <input class="fc" type="password" id="geminiKeyInp" placeholder="${localStorage.getItem('tjeanCRM_gemini_key')?'Key saved ✓ — enter new key to replace':'Paste Gemini API key…'}" style="max-width:320px">
+        <button class="btn btn-p btn-sm" onclick="saveGeminiKey()">Save Key</button>
+        ${localStorage.getItem('tjeanCRM_gemini_key')?`<button class="btn btn-d btn-sm" onclick="clearGeminiKey()">Remove Key</button>`:''}
+      </div>
+      <p style="font-size:12px;color:var(--t3);margin-top:8px">${localStorage.getItem('tjeanCRM_gemini_key')?'✓ AI translation is ON — also used by the AI PDF parser.':'AI translation is OFF — imports use glossary only.'}</p>
+    </div>`:''}
+
     ${canEdit()?`<div class="oc"><h3>⭐ Default Snapshot</h3>
       <p>Save the current data as your personal "default" snapshot. You can restore to it any time without losing it to a reset.</p>
       ${seedInfo}
@@ -4454,6 +4464,26 @@ function xlsxRowDate(v){
   if(/^\d+$/.test(s))return xlSerialToISO(parseInt(s,10));
   const d=new Date(s);return isNaN(d)?todayISO():d.toISOString().split('T')[0];
 }
+// AI fallback translation for phrases the built-in glossary doesn't cover.
+// Uses the same Gemini key as the PDF parser (saved once in localStorage). Returns
+// an array of translations (same order) or null on any failure — caller keeps Chinese.
+function hasCJK(s){return /[⺀-鿿　-ヿ＀-￯]/.test(String(s||''));}
+async function aiTranslateBatch(strings){
+  const key=localStorage.getItem('tjeanCRM_gemini_key');
+  if(!key||!strings.length)return null;
+  try{
+    const resp=await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key='+key,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({contents:[{parts:[{text:'Translate these Chinese appliance-repair phrases to concise English. Keep product codes, model numbers and digits unchanged. Reply with ONLY a JSON array of strings, same length and order, no markdown.\n'+JSON.stringify(strings)}]}]})
+    });
+    if(!resp.ok)return null;
+    const data=await resp.json();
+    let text=((((data.candidates||[])[0]||{}).content||{}).parts||[{}])[0].text||'';
+    text=text.replace(/```json|```/g,'').trim();
+    const arr=JSON.parse(text);
+    return Array.isArray(arr)&&arr.length===strings.length?arr.map(x=>String(x)):null;
+  }catch(e){console.warn('AI translate failed:',e);return null;}
+}
 async function importSupplierExcel(file){
   if(!file)return;
   if(!window.XLSX){
@@ -4486,7 +4516,8 @@ async function importSupplierExcel(file){
     const seen=new Set();
     DB.appliances.forEach(a=>{if(a&&a.serial)seen.add(String(a.serial).trim());});
     DB.jobs.forEach(j=>{if(j&&j.importKey)seen.add(String(j.importKey));});
-    const stats={added:0,dupes:0,noRepair:0,skipped:0,reasons:[]};
+    const stats={added:0,dupes:0,noRepair:0,skipped:0,aiFixed:0,reasons:[]};
+    const addedIds=[];
     for(let i=hr+1;i<aoa.length;i++){
       const r=aoa[i];if(!r||!r.length)continue;
       const noCol=String(cell(r,ix.no)).trim();
@@ -4531,15 +4562,53 @@ async function importSupplierExcel(file){
         techIds:[],importKey:key,source:'TJEAN Excel',createdAt:new Date().toISOString(),_modifiedAt:now};
       DB.jobs.push(job);markTouched('jobs');
       DB.nextIds.j=Math.max(DB.nextIds.j||1,seq+1);
+      addedIds.push(seq);
       stats.added++;
     }
     saveDB();if(typeof flushPendingSync==='function')flushPendingSync();
+    // AI pass: glossary may leave Chinese in some titles/descriptions — translate leftovers
+    // via Gemini (if a key is saved). Failure is silent: glossary result stays.
+    try{
+      const targets=addedIds.map(id=>DB.jobs.find(j=>j.id===id)).filter(j=>j&&(hasCJK(j.title)||hasCJK(j.desc)));
+      if(targets.length){
+        const src=[];targets.forEach(j=>{if(hasCJK(j.title))src.push(j.title);if(hasCJK(j.desc))src.push(j.desc);});
+        const uniq=[...new Set(src)];
+        const tr=await aiTranslateBatch(uniq);
+        if(tr){
+          const map={};uniq.forEach((s,i)=>{map[s]=tr[i];});
+          targets.forEach(j=>{
+            if(map[j.title])j.title=map[j.title];
+            if(map[j.desc])j.desc=map[j.desc];
+            j._modifiedAt=Date.now();stats.aiFixed++;
+          });
+          markTouched('jobs');saveDB();if(typeof flushPendingSync==='function')flushPendingSync();
+        }
+      }
+    }catch(e){console.warn('AI translate pass skipped:',e);}
     let body=`<p style="font-size:var(--fs-lg)"><strong>Added ${stats.added} job(s)</strong></p>`;
-    body+=`<p style="font-size:13px;color:var(--t2);margin-top:6px">${stats.noRepair} no-repair (Completed) · Skipped: ${stats.dupes} duplicate · ${stats.skipped} job-no. clash</p>`;
+    body+=`<p style="font-size:13px;color:var(--t2);margin-top:6px">${stats.noRepair} no-repair (Completed) · Skipped: ${stats.dupes} duplicate · ${stats.skipped} job-no. clash${stats.aiFixed?` · ${stats.aiFixed} AI-translated`:''}</p>`;
+    if(!localStorage.getItem('tjeanCRM_gemini_key')&&DB.jobs.some(j=>addedIds.includes(j.id)&&(hasCJK(j.title)||hasCJK(j.desc))))
+      body+=`<p style="font-size:12px;color:var(--wn);margin-top:6px">Some titles still contain Chinese. Save a free Gemini API key (aistudio.google.com/apikey) via the PDF-import prompt to auto-translate them on future imports.</p>`;
     if(stats.reasons.length){body+='<ul style="font-size:12px;line-height:1.6;margin-top:10px">';stats.reasons.slice(0,15).forEach(x=>body+=`<li>${E(x)}</li>`);if(stats.reasons.length>15)body+=`<li><em>…and ${stats.reasons.length-15} more</em></li>`;body+='</ul>';}
     openModal('Supplier Excel Import',body,'<button class="btn btn-p" onclick="closeModal()">OK</button>');
     refreshPage();
   }catch(e){console.error(e);toast('Excel import failed: '+e.message,'error');}
+}
+
+// ===== AI TRANSLATION KEY (Gemini, shared with PDF parser) =====
+function saveGeminiKey(){
+  const inp=document.getElementById('geminiKeyInp');
+  const key=(inp?inp.value:'').trim();
+  if(!key){toast('Paste a key first','error');return;}
+  localStorage.setItem('tjeanCRM_gemini_key',key);
+  toast('AI key saved — leftover Chinese will auto-translate on imports','success');
+  renderData();
+}
+function clearGeminiKey(){
+  if(!confirm('Remove the saved AI key? Imports will use the built-in glossary only.'))return;
+  localStorage.removeItem('tjeanCRM_gemini_key');
+  toast('AI key removed','info');
+  renderData();
 }
 
 // ===== DEFAULT SNAPSHOT (user-saved seed) =====
