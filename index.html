@@ -2049,6 +2049,7 @@ function renderAppliances(filter){
         <div class="rpt-card-row"><span class="rc-label">Breakdowns</span><span class="rc-val">${breakdowns} record(s)</span></div>
         <div class="rpt-card-actions">
           <button class="btn btn-sm btn-s" onclick="viewApplianceHistory(${a.id})">📜 History</button>
+          ${canEdit()?`<button class="btn btn-sm btn-s" onclick="openQuickPartChange(${a.id},null)">🔩 Log Part</button>`:''}
           ${canEdit()?`<button class="btn btn-sm btn-s" onclick="editAppliance(${a.id})">Edit</button>`:''}
           ${canDelete()?`<button class="btn btn-sm btn-d" onclick="delAppliance(${a.id})">Remove</button>`:''}
         </div>
@@ -2084,6 +2085,66 @@ function closeApplianceModal(savedOK){
   endFormDraft();closeModal();
 }
 function editAppliance(id){const a=DB.appliances.find(x=>x.id===id);if(a)openApplianceModal(a);}
+
+// ===== QUICK PART CHANGE — log a fitted part directly on an appliance/job (no full report) =====
+// True when a part's category (machine model tag) matches the appliance model,
+// e.g. category "24L" vs model "TJ-BZQKX24L1", or exact "TJ-ST102".
+function partMatchesModel(p,model){
+  const norm=s=>String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  const c=norm(p.category),m=norm(model);
+  return !!c&&c!=='general'&&!!m&&(m.includes(c)||c.includes(m));
+}
+function openQuickPartChange(applianceId,jobId){
+  const app=getApplianceById(applianceId);
+  if(!app){toast('No appliance linked — add/link an appliance first','error');return;}
+  if(!DB.parts.length){toast('No parts in catalog yet','error');return;}
+  // Group parts by category (model); the group matching THIS appliance goes first
+  const sorted=DB.parts.slice().sort((a,b)=>(a.category||'').localeCompare(b.category||'')||(a.name||'').localeCompare(b.name||''));
+  const match=sorted.filter(p=>partMatchesModel(p,app.model));
+  const rest=sorted.filter(p=>!partMatchesModel(p,app.model));
+  const opt=p=>`<option value="${p.id}">${E(p.name)} (${E(p.code)}) — stock ${p.stock}</option>`;
+  let opts='';
+  if(match.length)opts+=`<optgroup label="✓ For this machine (${E(app.model)})">${match.map(opt).join('')}</optgroup>`;
+  const byCat={};rest.forEach(p=>{const c=p.category||'Other';(byCat[c]=byCat[c]||[]).push(p);});
+  Object.keys(byCat).sort().forEach(c=>{opts+=`<optgroup label="${E(c)}">${byCat[c].map(opt).join('')}</optgroup>`;});
+  openModal('Log Part Change — '+app.model,
+    `<p style="font-size:13px;color:var(--t2);margin-bottom:10px">Customer: <strong>${E(getCustName(app.custId))}</strong> · Serial: <code>${E(app.serial)}</code></p>
+    <div class="fg"><label>Part *</label><select class="fc" id="qpcPart" onchange="qpcPreview(${applianceId})">${opts}</select></div>
+    <div class="fr"><div class="fg"><label>Quantity</label><input class="fc" type="number" id="qpcQty" value="1" min="1" max="99"></div>
+    <div class="fg"><label>Change Date</label><input class="fc" type="date" id="qpcDate" value="${todayISO()}" onchange="qpcPreview(${applianceId})"></div></div>
+    <div id="qpcWarr" style="font-size:13px;padding:10px;border-radius:8px;background:var(--acs);color:var(--ac);margin-top:4px"></div>`,
+    `<button class="btn btn-s" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="saveQuickPartChange(${applianceId},${jobId==null?'null':jobId})">Save Part Change</button>`);
+  qpcPreview(applianceId);
+}
+function qpcPreview(applianceId){
+  const pid=parseInt((document.getElementById('qpcPart')||{}).value);
+  const dt=(document.getElementById('qpcDate')||{}).value||todayISO();
+  const el=document.getElementById('qpcWarr');if(!el)return;
+  const w=computePartWarranty(applianceId,pid,dt);
+  el.textContent=w?`Warranty: ${w.sourceLabel} — covered until ${w.warrantyEnd} (${w.daysCovered} days)`:'Select a part';
+}
+function saveQuickPartChange(applianceId,jobId){
+  const app=getApplianceById(applianceId);if(!app)return;
+  const pid=parseInt(document.getElementById('qpcPart').value);
+  const part=getPartById(pid);
+  if(!part){toast('Pick a part','error');return;}
+  const qty=Math.max(1,parseInt(document.getElementById('qpcQty').value)||1);
+  const dt=document.getElementById('qpcDate').value||todayISO();
+  if(part.stock<qty&&!confirm(`Stock is ${part.stock} but you are logging ${qty}. Continue (stock will floor at 0)?`))return;
+  const now=Date.now();
+  part.stock=Math.max(0,part.stock-qty);part._modifiedAt=now;
+  let lastEnd='';
+  for(let i=0;i<qty;i++){
+    const w=computePartWarranty(applianceId,pid,dt);if(!w)continue;
+    lastEnd=w.warrantyEnd;
+    DB.partChanges.push({id:DB.nextIds.pc++,reportId:null,jobId:jobId||null,custId:app.custId,applianceId,partId:pid,
+      installDate:w.installDate,warrantyEnd:w.warrantyEnd,source:w.source,sourceLabel:w.sourceLabel,price:part.price,
+      createdAt:new Date().toISOString(),_modifiedAt:now});
+  }
+  markTouched('parts');markTouched('partChanges');saveDB();flushPendingSync();
+  closeModal();refreshPage();
+  toast(`${qty}× ${part.name} logged — warranty until ${lastEnd}`,'success');
+}
 function saveAppliance(){
   const eid=document.getElementById('eAId').value;
   const d={custId:parseInt(document.getElementById('aCust').value),model:document.getElementById('aMd').value.trim(),serial:document.getElementById('aSr').value.trim(),installDate:document.getElementById('aIn').value,warrantyMonths:parseInt(document.getElementById('aWr').value)||0,location:document.getElementById('aLo').value.trim(),_modifiedAt:Date.now()};
@@ -2121,7 +2182,8 @@ function viewApplianceHistory(id){
 // ===== PARTS INVENTORY =====
 function renderParts(filter){
   const fv=filter||'all';
-  let list=DB.parts.slice();
+  // Sorted by machine model (category) then part name so one machine's parts sit together
+  let list=DB.parts.slice().sort((a,b)=>(a.category||'').localeCompare(b.category||'')||(a.name||'').localeCompare(b.name||''));
   if(fv==='low')list=list.filter(p=>p.stock<=p.minStock&&p.stock>0);
   else if(fv==='out')list=list.filter(p=>p.stock===0);
   else if(fv!=='all')list=list.filter(p=>p.category===fv);
@@ -2143,9 +2205,25 @@ function renderParts(filter){
           <div class="pn">${E(p.code)}${p.oracleItem?` <span style="color:var(--t3);font-size:10px">· Oracle: ${E(p.oracleItem)}</span>`:''}</div>
           <div class="pp">${fmtMoney(p.price)}</div>
           <div class="part-stock"><span class="bd ${stockBd}" style="font-size:11px">Stock: ${p.stock}</span><span style="font-size:11px;color:var(--t3)">${E(wt)} warranty</span></div>
+          ${canEdit()?`<button class="btn btn-sm btn-s" style="margin-top:8px;width:100%" onclick="event.stopPropagation();copyPart(${p.id})" title="New part pre-filled from this one">⧉ Copy as New</button>`:''}
         </div>
       </div>`}).join(''):'<div class="es" style="grid-column:1/-1"><p>No parts found.</p></div>'}
     </div>`;
+}
+// Duplicate an existing part into a fresh "Add Part" form — same model/category/price/
+// warranty, blank code (must differ), name kept for quick editing.
+function copyPart(id){
+  const p=getPartById(id);if(!p)return;
+  clearFormDraft('part_new'); // a stale draft must not overwrite the prefill
+  openPartModal({...p,id:null,code:'',oracleItem:''});
+  toast('Pre-filled from "'+p.name+'" — set the new name & code','info');
+}
+// Known machine models for the dropdown: appliance fleet + existing part tags
+function knownModels(){
+  const s=new Set(['General']);
+  DB.appliances.forEach(a=>{if(a&&a.model)s.add(a.model);});
+  DB.parts.forEach(p=>{if(p&&p.category)s.add(p.category);});
+  return [...s].sort();
 }
 function openPartModal(data){
   const isEditing=!!(data&&data.id);
@@ -2157,7 +2235,8 @@ function openPartModal(data){
     <div class="fr"><div class="fg"><label>Part Name *</label><input class="fc" id="pNm" value="${E(d.name||'')}"></div>
     <div class="fg"><label>Part Code *</label><input class="fc" id="pCd" value="${E(d.code||'')}" style="font-family:monospace"></div></div>
     <div class="fr"><div class="fg"><label>Oracle Item Code</label><input class="fc" id="pOI" value="${E(d.oracleItem||'')}" style="font-family:monospace" placeholder="Stock system code"></div>
-    <div class="fg"><label>Category</label><input class="fc" id="pCt" value="${E(d.category||'General')}" placeholder="eSpring, Atmosphere..."></div></div>
+    <div class="fg"><label>Machine Model / Category</label><input class="fc" id="pCt" list="pCtModels" value="${E(d.category||'General')}" placeholder="Pick a model or type a new one…">
+    <datalist id="pCtModels">${knownModels().map(m=>`<option value="${E(m)}">`).join('')}</datalist></div></div>
     <div class="fr"><div class="fg" style="display:none"></div>
     <div class="fg"><label>Customer Price ($) *</label><input class="fc" type="number" step="0.01" id="pPr" value="${d.price||0}"></div></div>
     <div class="fr3"><div class="fg"><label>Stock Qty</label><input class="fc" type="number" id="pSk" value="${d.stock||0}" min="0"></div>
@@ -2278,6 +2357,7 @@ function renderJobs(filter){
         <div style="display:flex;gap:6px;margin:8px 0;flex-wrap:wrap">
           ${j.pdfAttachment?`<button class="btn btn-sm" style="background:#1a73e8;color:#fff" onclick="viewJobPDF(${j.id})">📎 View TJean PDF</button><button class="btn btn-sm btn-d" onclick="removeJobPDF(${j.id})" title="Remove PDF">✕</button>`:''}
           <button class="btn btn-sm" style="background:#0066a1;color:#fff" onclick="openCollectionForm(${j.id})">${j.status==='Completed'?'📋 View Collection Form':'✍️ Collection Form'}</button>
+          ${canEdit()&&j.applianceId?`<button class="btn btn-sm btn-s" onclick="openQuickPartChange(${j.applianceId},${j.id})">🔩 Log Part</button>`:''}
           ${j.signedPDF?`<button class="btn btn-sm" style="background:#188038;color:#fff" onclick="viewSignedPDF(${j.id})">📄 Signed PDF</button>`:''}
         </div>
         <div class="rpt-card-actions">
