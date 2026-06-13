@@ -786,7 +786,7 @@ function onNotifClick(id,jobId){
   if(jobId&&jobId!=='null'){
     toggleNotifPanel();
     showPage('jobs');
-    setTimeout(()=>{const inp=document.getElementById('jobSearchId');if(inp){inp.value=jobId;if(typeof searchJobById==='function')searchJobById();}},150);
+    setTimeout(()=>{const inp=document.getElementById('uniSearch');if(inp){inp.value='#'+jobId;if(typeof universalSearch==='function')universalSearch();}},150);
   }
 }
 function toggleNotifPanel(){
@@ -2023,24 +2023,19 @@ function viewCustDetail(id){
 
 // ===== APPLIANCES =====
 function renderAppliances(filter){
-  const fv=filter||'all';
+  const fv=filter||'all';  // 'all' | 'warranty' | 'expiring' | 'expired' | <Type of Appliance>
   let list=DB.appliances.slice();
   if(fv==='warranty')list=list.filter(a=>isApplianceUnderWarranty(a));
   else if(fv==='expired')list=list.filter(a=>!isApplianceUnderWarranty(a));
   else if(fv==='expiring')list=list.filter(a=>{const s=getApplianceWarrantyStatus(a);return s.status==='expiring';});
-  
-  document.getElementById('appliancesContent').innerHTML=`
-    <div class="oc"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px"><h3 style="margin:0">Customer Appliances (${list.length}/${DB.appliances.length})</h3>${canEdit()?'<button class="btn btn-p btn-sm" onclick="openApplianceModal()">+ Add Appliance</button>':''}</div>
-      <div class="flex-row" style="margin-top:12px">
-        <button class="fc-chip ${fv==='all'?'active':''}" onclick="renderAppliances('all')">All</button>
-        <button class="fc-chip ${fv==='warranty'?'active':''}" onclick="renderAppliances('warranty')">Under Warranty</button>
-        <button class="fc-chip ${fv==='expiring'?'active':''}" onclick="renderAppliances('expiring')">Expiring Soon</button>
-        <button class="fc-chip ${fv==='expired'?'active':''}" onclick="renderAppliances('expired')">Out of Warranty</button>
-      </div>
-    </div>
-    <div class="tw">
-      ${list.length?list.map(a=>{const s=getApplianceWarrantyStatus(a);const cls=s.status==='active'?'bd-ok':s.status==='expiring'?'bd-wn':'bd-er';const breakdowns=DB.reports.filter(r=>r.applianceId===a.id).length;return`<div class="rpt-card">
+  else if(fv!=='all')list=list.filter(a=>aType(a)===fv);
+  const types=[...new Set(DB.appliances.map(a=>aType(a)))].sort();
+  // Grouped by Type of Appliance, then model
+  list.sort((a,b)=>aType(a).localeCompare(aType(b))||(a.model||'').localeCompare(b.model||''));
+  const groups=[];list.forEach(a=>{const t=aType(a);const g=groups[groups.length-1];if(g&&g.type===t)g.items.push(a);else groups.push({type:t,items:[a]});});
+  const card=a=>{const s=getApplianceWarrantyStatus(a);const cls=s.status==='active'?'bd-ok':s.status==='expiring'?'bd-wn':'bd-er';const breakdowns=DB.reports.filter(r=>r.applianceId===a.id).length;return`<div class="rpt-card">
         <div class="rpt-card-top"><span style="font-weight:700">${E(a.model)}</span><span class="bd ${cls}">${E(s.label)}</span></div>
+        <div class="rpt-card-row"><span class="rc-label">Type</span><span class="rc-val">${E(aType(a))}</span></div>
         <div class="rpt-card-row"><span class="rc-label">Serial</span><span class="rc-val" style="font-family:monospace">${E(a.serial)}</span></div>
         <div class="rpt-card-row"><span class="rc-label">Customer</span><span class="rc-val">${E(getCustName(a.custId))}</span></div>
         <div class="rpt-card-row"><span class="rc-label">Location</span><span class="rc-val">${E(a.location||'—')}</span></div>
@@ -2053,8 +2048,18 @@ function renderAppliances(filter){
           ${canEdit()?`<button class="btn btn-sm btn-s" onclick="editAppliance(${a.id})">Edit</button>`:''}
           ${canDelete()?`<button class="btn btn-sm btn-d" onclick="delAppliance(${a.id})">Remove</button>`:''}
         </div>
-      </div>`}).join(''):'<div class="es"><p>No appliances. Click "+ Add Appliance" to start.</p></div>'}
-    </div>`;
+      </div>`};
+  document.getElementById('appliancesContent').innerHTML=`
+    <div class="oc"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px"><h3 style="margin:0">Customer Appliances (${list.length}/${DB.appliances.length})</h3>${canEdit()?'<button class="btn btn-p btn-sm" onclick="openApplianceModal()">+ Add Appliance</button>':''}</div>
+      <div class="flex-row" style="margin-top:12px">
+        <button class="fc-chip ${fv==='all'?'active':''}" onclick="renderAppliances('all')">All</button>
+        <button class="fc-chip ${fv==='warranty'?'active':''}" onclick="renderAppliances('warranty')">Under Warranty</button>
+        <button class="fc-chip ${fv==='expiring'?'active':''}" onclick="renderAppliances('expiring')">Expiring Soon</button>
+        <button class="fc-chip ${fv==='expired'?'active':''}" onclick="renderAppliances('expired')">Out of Warranty</button>
+        ${types.map(t=>`<button class="fc-chip ${fv===t?'active':''}" onclick="renderAppliances('${E(t)}')">${E(t)}</button>`).join('')}
+      </div>
+    </div>
+    ${groups.length?groups.map(g=>`<h4 style="margin:18px 0 10px">${E(g.type)} (${g.items.length})</h4><div class="tw">${g.items.map(card).join('')}</div>`).join(''):'<div class="es"><p>No appliances. Click "+ Add Appliance" to start.</p></div>'}`;
 }
 function openApplianceModal(data){
   const isEditing=!!(data&&data.id);
@@ -2065,18 +2070,20 @@ function openApplianceModal(data){
     `<input type="hidden" id="eAId" value="${d.id||''}">
     <input type="hidden" id="aDraftKey" value="${draftKey}">
     <div class="fg"><label>Customer *</label><select class="fc" id="aCust"><option value="">— Select —</option>${custOpts}</select></div>
-    <div class="fr"><div class="fg"><label>Model / Product Name *</label><input class="fc" id="aMd" value="${E(d.model||'')}" placeholder="eSpring, Atmosphere..."></div>
-    <div class="fg"><label>Serial Number *</label><input class="fc" id="aSr" value="${E(d.serial||'')}"></div></div>
+    <div class="fr"><div class="fg"><label>Type of Appliance</label>${typeSelectHTML('aTySel','aTyNew',d.type)}</div>
+    <div class="fg"><label>Model / Product Name *</label><input class="fc" id="aMd" list="aMdModels" value="${E(d.model||'')}" placeholder="eSpring, Atmosphere..." oninput="autoTypeFromModel('aMd','aTySel','aTyNew')" onchange="autoTypeFromModel('aMd','aTySel','aTyNew')">
+    <datalist id="aMdModels">${knownModels().map(m=>`<option value="${E(m)}">`).join('')}</datalist></div></div>
+    <div class="fg"><label>Serial Number *</label><input class="fc" id="aSr" value="${E(d.serial||'')}"></div>
     <div class="fr"><div class="fg"><label>Install Date *</label><input class="fc" type="date" id="aIn" value="${E(d.installDate||todayISO())}"></div>
     <div class="fg"><label>Warranty (months)</label><input class="fc" type="number" id="aWr" value="${d.warrantyMonths||12}" min="0"></div></div>
     <div class="fg"><label>Location in Home</label><input class="fc" id="aLo" value="${E(d.location||'')}" placeholder="Kitchen, Living Room..."></div>
     <p style="font-size:11px;color:var(--t3);text-align:center;margin-top:8px">💾 Auto-saved as you type</p>`,
     `<button class="btn btn-s" onclick="closeApplianceModal(false)">Cancel</button><button class="btn btn-p" onclick="saveAppliance()">Save</button>`);
-  startFormDraft(draftKey,['eAId','aCust','aMd','aSr','aIn','aWr','aLo']);
+  startFormDraft(draftKey,['eAId','aCust','aTySel','aTyNew','aMd','aSr','aIn','aWr','aLo']);
   if(!isEditing){
     setTimeout(async()=>{
       const restore=await offerDraftRestore(draftKey,'appliance');
-      if(restore)applyFormDraft(getFormDraft(draftKey));
+      if(restore){applyFormDraft(getFormDraft(draftKey));onTypeSelChange('aTySel','aTyNew');}
     },100);
   }
 }
@@ -2147,7 +2154,7 @@ function saveQuickPartChange(applianceId,jobId){
 }
 function saveAppliance(){
   const eid=document.getElementById('eAId').value;
-  const d={custId:parseInt(document.getElementById('aCust').value),model:document.getElementById('aMd').value.trim(),serial:document.getElementById('aSr').value.trim(),installDate:document.getElementById('aIn').value,warrantyMonths:parseInt(document.getElementById('aWr').value)||0,location:document.getElementById('aLo').value.trim(),_modifiedAt:Date.now()};
+  const d={custId:parseInt(document.getElementById('aCust').value),type:readTypeSelect('aTySel','aTyNew'),model:document.getElementById('aMd').value.trim(),serial:document.getElementById('aSr').value.trim(),installDate:document.getElementById('aIn').value,warrantyMonths:parseInt(document.getElementById('aWr').value)||0,location:document.getElementById('aLo').value.trim(),_modifiedAt:Date.now()};
   if(!d.custId||!d.model||!d.serial||!d.installDate){toast('Fill in required fields','error');return;}
   if(eid){const i=DB.appliances.findIndex(a=>a.id===parseInt(eid));if(i>=0)DB.appliances[i]={...DB.appliances[i],...d};}
   else{d.id=DB.nextIds.a++;DB.appliances.push(d);}
@@ -2235,10 +2242,46 @@ function knownModels(){
 }
 // Top-level grouping: Type of Appliance. Parts saved before this field exist -> 'General'.
 function pType(p){return (p&&p.type)||'General';}
+function aType(a){return (a&&a.type)||'General';}
 function knownTypes(){
   const s=new Set(['Steam Oven','Coffee Machine','Vacuum Cleaner','General']);
   DB.parts.forEach(p=>{if(p&&p.type)s.add(p.type);});
+  DB.appliances.forEach(a=>{if(a&&a.type)s.add(a.type);});
   return [...s].sort();
+}
+// Type of Appliance picker: a real <select> (a datalist filtered options by the
+// prefilled value, hiding every other type) plus a free-text input for new types.
+function typeSelectHTML(selId,newId,current){
+  const cur=current||'General';
+  return `<select class="fc" id="${selId}" onchange="onTypeSelChange('${selId}','${newId}')">${knownTypes().map(t=>`<option value="${E(t)}"${t===cur?' selected':''}>${E(t)}</option>`).join('')}<option value="__new__">➕ New type…</option></select>
+    <input class="fc" id="${newId}" style="display:none;margin-top:6px" placeholder="New appliance type…">`;
+}
+function onTypeSelChange(selId,newId){
+  const sel=document.getElementById(selId),inp=document.getElementById(newId);
+  if(!sel||!inp)return;
+  const isNew=sel.value==='__new__';
+  inp.style.display=isNew?'':'none';
+  if(isNew)inp.focus();
+}
+function readTypeSelect(selId,newId){
+  const sel=document.getElementById(selId);if(!sel)return'General';
+  if(sel.value==='__new__'){const inp=document.getElementById(newId);return(inp&&inp.value.trim())||'General';}
+  return sel.value||'General';
+}
+// Remembered Type of Appliance for a model number — from existing appliances first, then parts
+function typeForModel(model){
+  const m=String(model||'').trim().toLowerCase();if(!m)return'';
+  const a=DB.appliances.find(x=>x&&x.type&&String(x.model||'').trim().toLowerCase()===m);
+  if(a)return a.type;
+  const p=DB.parts.find(x=>x&&x.type&&String(x.category||'').trim().toLowerCase()===m);
+  return p?p.type:'';
+}
+// When a known model number is entered, auto-select its remembered appliance type
+function autoTypeFromModel(modelId,selId,newId){
+  const t=typeForModel((document.getElementById(modelId)||{}).value);
+  if(!t)return;
+  const sel=document.getElementById(selId);if(!sel)return;
+  if([...sel.options].some(o=>o.value===t)){sel.value=t;onTypeSelChange(selId,newId);}
 }
 function openPartModal(data){
   const isEditing=!!(data&&data.id);
@@ -2250,9 +2293,8 @@ function openPartModal(data){
     <div class="fr"><div class="fg"><label>Part Name *</label><input class="fc" id="pNm" value="${E(d.name||'')}"></div>
     <div class="fg"><label>Part Code *</label><input class="fc" id="pCd" value="${E(d.code||'')}" style="font-family:monospace"></div></div>
     <div class="fr"><div class="fg"><label>Oracle Item Code</label><input class="fc" id="pOI" value="${E(d.oracleItem||'')}" style="font-family:monospace" placeholder="Stock system code"></div>
-    <div class="fg"><label>Type of Appliance</label><input class="fc" id="pTy" list="pTypeList" value="${E(d.type||'General')}" placeholder="Coffee Machine, Steam Oven, Vacuum Cleaner…">
-    <datalist id="pTypeList">${knownTypes().map(t=>`<option value="${E(t)}">`).join('')}</datalist></div></div>
-    <div class="fg"><label>Machine Model / Category</label><input class="fc" id="pCt" list="pCtModels" value="${E(d.category||'General')}" placeholder="Pick a model or type a new one…">
+    <div class="fg"><label>Type of Appliance</label>${typeSelectHTML('pTySel','pTyNew',d.type)}</div></div>
+    <div class="fg"><label>Machine Model / Category</label><input class="fc" id="pCt" list="pCtModels" value="${E(d.category||'General')}" placeholder="Pick a model or type a new one…" oninput="autoTypeFromModel('pCt','pTySel','pTyNew')" onchange="autoTypeFromModel('pCt','pTySel','pTyNew')">
     <datalist id="pCtModels">${knownModels().map(m=>`<option value="${E(m)}">`).join('')}</datalist></div>
     <div class="fg"><label>Storage Location</label><input class="fc" id="pLoc" value="${E(d.location||'')}" placeholder="e.g. Shelf A3 · Bin 5 · Store room"></div>
     <div class="fr"><div class="fg" style="display:none"></div>
@@ -2268,11 +2310,11 @@ function openPartModal(data){
     <p style="font-size:11px;color:var(--t3);text-align:center;margin-top:8px">💾 Auto-saved as you type (photo not auto-saved — re-select if you reopen)</p>`,
     `<button class="btn btn-s" onclick="closePartModal(false)">Cancel</button><button class="btn btn-p" onclick="savePart()">Save</button>`);
   // Exclude photo data (can be large) and the file input from drafts
-  startFormDraft(draftKey,['ePId','pNm','pCd','pOI','pCt','pPr','pSk','pMn','pWt','pNt'],{exclude:['pPhData','pPhFile']});
+  startFormDraft(draftKey,['ePId','pNm','pCd','pOI','pTySel','pTyNew','pCt','pLoc','pPr','pSk','pMn','pWt','pNt'],{exclude:['pPhData','pPhFile']});
   if(!isEditing){
     setTimeout(async()=>{
       const restore=await offerDraftRestore(draftKey,'part');
-      if(restore)applyFormDraft(getFormDraft(draftKey));
+      if(restore){applyFormDraft(getFormDraft(draftKey));onTypeSelChange('pTySel','pTyNew');}
     },100);
   }
 }
@@ -2302,7 +2344,7 @@ function onPartPhotoSelect(e){
 function editPart(id){const p=DB.parts.find(x=>x.id===id);if(p)openPartModal(p);}
 function savePart(){
   const eid=document.getElementById('ePId').value;
-  const d={name:document.getElementById('pNm').value.trim(),code:document.getElementById('pCd').value.trim(),oracleItem:document.getElementById('pOI').value.trim(),type:(document.getElementById('pTy')?document.getElementById('pTy').value.trim():'')||'General',category:document.getElementById('pCt').value.trim()||'General',location:(document.getElementById('pLoc')?document.getElementById('pLoc').value.trim():''),price:parseFloat(document.getElementById('pPr').value)||0,stock:parseInt(document.getElementById('pSk').value)||0,minStock:parseInt(document.getElementById('pMn').value)||0,defaultWarrantyType:document.getElementById('pWt').value,photo:document.getElementById('pPhData').value,notes:document.getElementById('pNt').value.trim(),_modifiedAt:Date.now()};
+  const d={name:document.getElementById('pNm').value.trim(),code:document.getElementById('pCd').value.trim(),oracleItem:document.getElementById('pOI').value.trim(),type:readTypeSelect('pTySel','pTyNew'),category:document.getElementById('pCt').value.trim()||'General',location:(document.getElementById('pLoc')?document.getElementById('pLoc').value.trim():''),price:parseFloat(document.getElementById('pPr').value)||0,stock:parseInt(document.getElementById('pSk').value)||0,minStock:parseInt(document.getElementById('pMn').value)||0,defaultWarrantyType:document.getElementById('pWt').value,photo:document.getElementById('pPhData').value,notes:document.getElementById('pNt').value.trim(),_modifiedAt:Date.now()};
   if(!d.name||!d.code){toast('Name and code are required','error');return;}
   if(eid){const i=DB.parts.findIndex(p=>p.id===parseInt(eid));if(i>=0)DB.parts[i]={...DB.parts[i],...d};}
   else{d.id=DB.nextIds.p++;DB.parts.push(d);}
@@ -2343,21 +2385,7 @@ function viewPart(id){
 }
 
 // ===== JOBS =====
-function renderJobs(filter){
-  const fv=filter||'active';
-  let list=DB.jobs.slice().sort((a,b)=>(b.id||0)-(a.id||0));
-  if(fv==='active')list=list.filter(j=>j.status!=='Completed'&&j.status!=='Cancelled');
-  else if(fv==='completed')list=list.filter(j=>j.status==='Completed');
-  document.getElementById('jobsContent').innerHTML=`
-    <div class="oc"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px"><h3 style="margin:0">Jobs (${list.length})</h3><div style="display:flex;gap:8px;flex-wrap:wrap"><input class="fc" id="jobSearchId" placeholder="Search Job ID" style="width:120px;padding:6px 10px;font-size:13px" oninput="searchJobById()"> ${canEdit()?'<button class="btn btn-p btn-sm" onclick="openJobModal()">+ New Job</button>':''}</div></div>
-      <div class="flex-row" style="margin-top:12px">
-        <button class="fc-chip ${fv==='all'?'active':''}" onclick="renderJobs('all')">All</button>
-        <button class="fc-chip ${fv==='active'?'active':''}" onclick="renderJobs('active')">Active</button>
-        <button class="fc-chip ${fv==='completed'?'active':''}" onclick="renderJobs('completed')">Completed</button>
-      </div>
-    </div>
-    <div class="tw">
-      ${list.length?list.map(j=>`<div class="rpt-card">
+function jobCardHTML(j){return`<div class="rpt-card">
         <div class="rpt-card-top"><span style="font-weight:700">#${j.id} — ${E(j.title)}</span>${prBd(j.priority)}</div>
         <div class="rpt-card-row"><span class="rc-label">Customer</span><span class="rc-val">${E(j.customer)}</span></div>
         ${j.appliance?`<div class="rpt-card-row"><span class="rc-label">Appliance</span><span class="rc-val">${E(j.appliance)}</span></div>`:''}
@@ -2384,14 +2412,48 @@ function renderJobs(filter){
           ${canEdit()?`<button class="btn btn-sm btn-s" onclick="updateJobStatus(${j.id})">Update Status</button>`:''}
           ${canDelete()?`<button class="btn btn-sm btn-d" onclick="delJob(${j.id})">Remove</button>`:''}
         </div>
-      </div>`).join(''):'<div class="es"><p>No jobs.</p></div>'}
-    </div>`;
+      </div>`;}
+function renderJobs(filter){
+  const fv=filter||'active';
+  let list=DB.jobs.slice().sort((a,b)=>(b.id||0)-(a.id||0));
+  if(fv==='active')list=list.filter(j=>j.status!=='Completed'&&j.status!=='Cancelled');
+  else if(fv==='completed')list=list.filter(j=>j.status==='Completed');
+  document.getElementById('jobsContent').innerHTML=`
+    <div class="oc"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px"><h3 style="margin:0">Jobs (${list.length})</h3><div style="display:flex;gap:8px;flex-wrap:wrap"><input class="fc" id="uniSearch" placeholder="🔍 Search jobs, customers, serials, parts…" style="width:240px;padding:6px 10px;font-size:13px" oninput="universalSearch()"> ${canEdit()?'<button class="btn btn-p btn-sm" onclick="openJobModal()">+ New Job</button>':''}</div></div>
+      <div class="flex-row" style="margin-top:12px">
+        <button class="fc-chip ${fv==='all'?'active':''}" onclick="renderJobs('all')">All</button>
+        <button class="fc-chip ${fv==='active'?'active':''}" onclick="renderJobs('active')">Active</button>
+        <button class="fc-chip ${fv==='completed'?'active':''}" onclick="renderJobs('completed')">Completed</button>
+      </div>
+    </div>
+    <div class="tw" id="jobsListWrap">
+      ${list.length?list.map(jobCardHTML).join(''):'<div class="es"><p>No jobs.</p></div>'}
+    </div>
+    <div id="uniResults" style="display:none"></div>`;
 }
-function searchJobById(){
-  const q=(document.getElementById('jobSearchId')||{}).value||'';
-  if(!q){renderJobs();return;}
-  const cards=document.querySelectorAll('.rpt-card');
-  cards.forEach(c=>{c.style.display=c.textContent.includes('#'+q)||c.textContent.includes(q)?'':'none';});
+// Universal search across jobs, customers, appliances and parts.
+// Matching jobs render as full job cards; other entities as clickable rows.
+function universalSearch(){
+  const q=String((document.getElementById('uniSearch')||{}).value||'').trim().toLowerCase();
+  const wrap=document.getElementById('jobsListWrap'),res=document.getElementById('uniResults');
+  if(!wrap||!res)return;
+  if(!q){res.style.display='none';res.innerHTML='';wrap.style.display='';return;}
+  const has=s=>String(s||'').toLowerCase().includes(q);
+  const idQ=q.replace(/^#/,'');
+  const jobs=DB.jobs.filter(j=>String(j.id)===idQ||has(j.jobNo)||has(j.title)||has(j.customer)||has(j.appliance)||has(j.desc)||has(j.repair)||has(j.remarks)||has(j.quoteNum)||has(j.quoteNumParts)||has(j.status)||has(j.collectedOn));
+  const custs=DB.custs.filter(c=>has(c.name)||has(c.phone)||has(c.homePhone)||has(c.email)||has(c.address));
+  const apps=DB.appliances.filter(a=>has(a.model)||has(a.serial)||has(a.location)||has(aType(a))||has(getCustName(a.custId)));
+  const parts=DB.parts.filter(p=>has(p.name)||has(p.code)||has(p.oracleItem)||has(p.category)||has(pType(p))||has(p.location));
+  const row=(title,sub,click)=>`<div class="rpt-card" style="cursor:pointer" onclick="${click}"><div class="rpt-card-top"><span style="font-weight:700">${title}</span></div><div class="rpt-card-row"><span class="rc-val">${sub}</span></div></div>`;
+  const sec=(label,inner)=>`<h4 style="margin:18px 0 10px">${label}</h4><div class="tw">${inner}</div>`;
+  let html='';
+  if(jobs.length)html+=sec(`🛠️ Jobs (${jobs.length})`,jobs.slice(0,25).map(jobCardHTML).join(''));
+  if(custs.length)html+=sec(`👤 Customers (${custs.length})`,custs.slice(0,25).map(c=>row(E(c.name),`${E(c.phone||'—')}${c.address?' · '+E(c.address):''}`,`viewCustDetail(${c.id})`)).join(''));
+  if(apps.length)html+=sec(`📺 Appliances (${apps.length})`,apps.slice(0,25).map(a=>row(`${E(a.model)} <span class="muted" style="font-weight:400">(${E(aType(a))})</span>`,`SN: ${E(a.serial)} · ${E(getCustName(a.custId))}`,`viewApplianceHistory(${a.id})`)).join(''));
+  if(parts.length)html+=sec(`🔩 Parts (${parts.length})`,parts.slice(0,25).map(p=>row(E(p.name),`${E(p.code)} · ${E(pType(p))} · ${E(p.category||'—')} · Stock: ${p.stock}`,`viewPart(${p.id})`)).join(''));
+  if(!html)html='<div class="es" style="margin-top:18px"><p>No results for “'+E(q)+'”.</p></div>';
+  wrap.style.display='none';
+  res.innerHTML=html;res.style.display='';
 }
 function openJobModal(data){
   const isEditing=!!(data&&data.id);
